@@ -5,6 +5,7 @@
  * @-mention autocomplete suggestions to the interactive editor.
  */
 
+import { readdir } from "node:fs/promises";
 import nodePath from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
@@ -481,24 +482,60 @@ export default function fffExtension(pi: ExtensionAPI) {
     signal: AbortSignal,
   ): Promise<AutocompleteItem[]> {
     if (signal.aborted) return [];
-    const f = await ensureFinder(activeCwd);
+    const route = routePathConstraint(query, activeCwd);
+    if (route && !/[/[*?{]/.test(route.suffix)) {
+      try {
+        const needle = route.suffix.toLowerCase();
+        return (await readdir(route.root, { withFileTypes: true }))
+          .filter((entry) => entry.name.toLowerCase().includes(needle))
+          .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()))
+          .slice(0, MENTION_MAX_RESULTS)
+          .map((entry) => {
+            const relativePath = nodePath
+              .relative(activeCwd, nodePath.join(route.root, entry.name))
+              .replaceAll(nodePath.sep, "/");
+            return {
+              value: buildAtCompletionValue(relativePath),
+              label: entry.name,
+              description: relativePath,
+            };
+          });
+      } catch {
+        return [];
+      }
+    }
+    const aux = route ? await auxPool.acquire(route.root) : null;
+    const f = aux?.finder ?? (await ensureFinder(activeCwd));
     if (signal.aborted) return [];
 
-    const result = f.mixedSearch(query, { pageSize: MENTION_MAX_RESULTS });
+    const suffix = route
+      ? [
+          nodePath.relative(aux!.root, route.root).replaceAll(nodePath.sep, "/"),
+          route.suffix,
+        ]
+          .filter(Boolean)
+          .join("/")
+      : query;
+    const result = f.mixedSearch(suffix, { pageSize: MENTION_MAX_RESULTS });
     if (!result.ok) return [];
 
     return result.value.items.slice(0, MENTION_MAX_RESULTS).map((mixed: MixedItem) => {
+      const relativePath = aux
+        ? nodePath
+            .relative(activeCwd, nodePath.resolve(aux.root, mixed.item.relativePath))
+            .replaceAll(nodePath.sep, "/")
+        : mixed.item.relativePath;
       if (mixed.type === "directory") {
         return {
-          value: buildAtCompletionValue(mixed.item.relativePath),
+          value: buildAtCompletionValue(relativePath),
           label: mixed.item.dirName,
-          description: mixed.item.relativePath,
+          description: relativePath,
         };
       }
       return {
-        value: buildAtCompletionValue(mixed.item.relativePath),
+        value: buildAtCompletionValue(relativePath),
         label: mixed.item.fileName,
-        description: mixed.item.relativePath,
+        description: relativePath,
       };
     });
   }
